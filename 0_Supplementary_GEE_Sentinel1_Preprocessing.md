@@ -1,4 +1,4 @@
-# Supplementary Code: Sentinel-1 Preprocessing in Google Earth Engine
+﻿# Supplementary Code: Sentinel-1 Preprocessing in Google Earth Engine
 
 The following Google Earth Engine (GEE) script filters Sentinel-1A imagery for the study area, applies the incidence-angle normalization and median filtering described in the manuscript, and exports the processed VV and VH time-series images to Google Drive.
 
@@ -127,5 +127,4 @@ for (var i = 0; i < n; i++) {
   });
 }
 ```
-
 

@@ -165,7 +165,7 @@ def generate_batch_indices_from_array(h5_indices, batch_size=100000):
 # Rule-based screening function for rapeseed-rice pixels
 # -------------------------
 def process_rape_rice(vh_arr, timestamps):
-    """Return the rule label and whether the pre-peak VH minimum criterion passes.
+    """Return 1 for a selected positive seed and 0 for an unselected pixel.
 
     The selected VH peak must occur during DOY 85-160 and exceed 0.06.
     A VH local minimum must occur during DOY 20-90 before that peak.
@@ -173,56 +173,56 @@ def process_rape_rice(vh_arr, timestamps):
     try:
         n = len(vh_arr)
         if n == 0 or len(timestamps) != n:
-            return 0, False
+            return 0
         if n <= 12:
-            return 0, True
+            return 0
 
         doy_list = [doy_from_date(ts) for ts in timestamps]
         doy_arr = np.asarray(doy_list)
 
         vh_local_maxima = argrelextrema(vh_arr, np.greater)[0]
         if len(vh_local_maxima) == 0:
-            return 0, True
+            return 0
         valid_maxima = vh_local_maxima[
             (vh_local_maxima >= 6) & (vh_local_maxima <= n - 7)
         ]
         if len(valid_maxima) == 0:
-            return 0, True
+            return 0
 
         max_idx = valid_maxima[np.argmax(vh_arr[valid_maxima])]
         max_val = vh_arr[max_idx]
         max_doy = doy_list[max_idx]
         if not (85 <= max_doy <= 160) or not (max_val > 0.06):
-            return 0, True
+            return 0
 
-        # Hard-filter condition: at least one VH local minimum between DOY
-        # 20 and 90, strictly before the selected flowering-season maximum.
+        # Positive seeds require a VH local minimum during DOY 20-90,
+        # before the candidate podding peak.
         pre_mask = (doy_arr >= 20) & (doy_arr <= 90) & (doy_arr < max_doy)
         pre_indices = np.flatnonzero(pre_mask)
         if len(pre_indices) == 0:
-            return 0, False
+            return 0
         local_minima = argrelextrema(vh_arr, np.less)[0]
         pass_pre_minimum = bool(np.isin(local_minima, pre_indices).any())
         if not pass_pre_minimum:
-            return 0, False
+            return 0
 
         post_min_candidates = argrelextrema(vh_arr[max_idx:], np.less)[0]
         if len(post_min_candidates) == 0:
-            return 0, True
+            return 0
         post_min_val = vh_arr[max_idx + post_min_candidates[0]]
         if post_min_val >= 0.02:
-            return 0, True
+            return 0
 
         sum_val = max_val + post_min_val
         if sum_val <= 0:
-            return 0, True
+            return 0
         norm_diff = (max_val - post_min_val) / sum_val
         if norm_diff < 0.6:
-            return 0, True
+            return 0
 
-        return 1, True
+        return 1
     except Exception:
-        return 0, False
+        return 0
 
 def get_timestamps_from_merged(merged_h5_path):
     print(f"[{datetime.now()}] Reading timestamps from merged HDF5 file: {merged_h5_path}")
@@ -494,13 +494,9 @@ def main():
     # 7. Apply rule-based screening.
     print(f"\n[{datetime.now()}] Starting rule screening (updated rapeseed-rice rules; {len(batch_list)} batches; field pixels only)...")
     pix_to_rule_path = os.path.join(output_directory, "rule_pixel_predictions.dat")
-    pix_to_pre_min_path = os.path.join(output_directory, "pre_peak_local_minimum_pass.dat")
     pix_to_rule = np.memmap(pix_to_rule_path, dtype=np.uint8, mode="w+", shape=(total_pixels,))
-    pix_to_pre_min = np.memmap(pix_to_pre_min_path, dtype=np.uint8, mode="w+", shape=(total_pixels,))
     pix_to_rule[:] = 0
-    pix_to_pre_min[:] = 0
     pix_to_rule.flush()
-    pix_to_pre_min.flush()
 
     current_idx = 0
     for batch_idx, batch in enumerate(tqdm(batch_list, desc="Rule screening", total=len(batch_list))):
@@ -510,24 +506,22 @@ def main():
 
         batch_size = len(batch)
         vh_block = read_h5_data_from_merged(vh_merged_path, batch)
-        rule_pairs = [process_rape_rice(vh_arr, common_timestamps) for vh_arr in vh_block]
-        rule_res = np.fromiter((item[0] for item in rule_pairs), dtype=np.uint8, count=batch_size)
-        pre_min_res = np.fromiter((item[1] for item in rule_pairs), dtype=np.uint8, count=batch_size)
+        rule_res = np.fromiter(
+            (process_rape_rice(vh_arr, common_timestamps) for vh_arr in vh_block),
+            dtype=np.uint8,
+            count=batch_size,
+        )
 
         pix_to_rule[current_idx:current_idx + batch_size] = rule_res
-        pix_to_pre_min[current_idx:current_idx + batch_size] = pre_min_res
         pix_to_rule.flush()
-        pix_to_pre_min.flush()
 
         current_idx += batch_size
-        del vh_block, rule_pairs, rule_res, pre_min_res, batch
+        del vh_block, rule_res, batch
         gc.collect()
 
     rotation_count = (pix_to_rule == 1).sum()
-    hard_filtered_count = (pix_to_pre_min == 0).sum()
     print(
-        f"[{datetime.now()}] Rule screening complete; target pixels inside parcels={rotation_count:,}, non-target pixels={total_pixels - rotation_count:,}")
-    print(f"Pixels hard-filtered for missing pre-peak local minimum: {hard_filtered_count:,}")
+        f"[{datetime.now()}] Rule screening complete; positive seeds inside parcels={rotation_count:,}, unselected pixels={total_pixels - rotation_count:,}")
     log_memory_usage("after rule screening")
 
     # 8. Write rule-based classification raster
@@ -675,9 +669,8 @@ def main():
         current_rule_res = pix_to_rule[current_idx:current_idx + batch_size]
         pix_to_rf[current_idx:current_idx + batch_size] = current_rule_res
 
-        # Apply RF only to pixels classified as negative by the rule.
-        current_pre_min_pass = pix_to_pre_min[current_idx:current_idx + batch_size]
-        pred_mask = (current_rule_res == 0) & (current_pre_min_pass == 1)
+        # Predict every field pixel not selected as a positive seed.
+        pred_mask = current_rule_res == 0
         if pred_mask.any():
             pred_h5idx = batch[pred_mask]
             pred_rf_idx = current_idx + np.where(pred_mask)[0]
@@ -692,7 +685,7 @@ def main():
 
             del vh_pred, vv_pred, X_pred, y_pred
         current_idx += batch_size
-        del batch, batch_size, current_rule_res, current_pre_min_pass, pred_mask
+        del batch, batch_size, current_rule_res, pred_mask
         gc.collect()
 
     log_memory_usage("RF prediction completed")
@@ -721,10 +714,10 @@ def main():
 
     # 12. Remove temporary files
     print(f"\n[{datetime.now()}] Total runtime: {datetime.now() - start_total}")
-    del pix_to_rule, pix_to_pre_min, pix_to_rf, field_h5idx, batch_list, batch_start_rel
+    del pix_to_rule, pix_to_rf, field_h5idx, batch_list, batch_start_rel
     del rowcol_to_h5idx, h5idx_to_row, h5idx_to_col, field_data
     gc.collect()
-    for path in [pix_to_rule_path, pix_to_pre_min_path, pix_to_rf_path]:
+    for path in [pix_to_rule_path, pix_to_rf_path]:
         if os.path.exists(path):
             os.unlink(path)
     print(f"[{datetime.now()}] Processing finished.")
@@ -732,5 +725,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
