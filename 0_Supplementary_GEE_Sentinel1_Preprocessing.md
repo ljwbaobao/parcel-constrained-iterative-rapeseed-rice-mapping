@@ -47,7 +47,7 @@ var S2_image = S2.filterBounds(StudyArea)
                  .filterMetadata('CLOUD_COVERAGE_ASSESSMENT', 'less_than', 5);
 Map.addLayer(S2_image.first().clip(StudyArea), S2Param, "S2image");
 
-//---------------------------Part 3: Sentinel-1 preprocessing------------------------
+//---------------------------Part 2: Sentinel-1 preprocessing------------------------
 // 1. Incidence-angle normalization
 function toGamma0(img) {
   var gamma0 = img.expression('i - 10 * log10(cos(angle * pi / 180))', {
@@ -86,7 +86,7 @@ var PreV_spk_Clip_S1 = Pre_Clip_S1.select(["VV_linear"]).map(medianFilter).selec
 var PreH_spk_Clip_S1 = Pre_Clip_S1.select(["VH_linear"]).map(medianFilter).select("VH_linear_spk");
 var Pre_spk_Clip_S1 = PreV_spk_Clip_S1.combine(PreH_spk_Clip_S1);
 
-//---------------------------Part 4: Export the processed images---------------------
+//---------------------------Part 3: Export the processed images---------------------
 
 // Convert the image collection to a list for iteration
 var listOfImages = Pre_spk_Clip_S1.toList(Pre_spk_Clip_S1.size());
